@@ -101,7 +101,7 @@ pip install pyinstaller
 Run this in the folder that contains `pomodoro_todo.py`:
 
 ```bash
-pyinstaller --onefile --windowed --name PomodoroTodo pomodoro_todo.py
+pyinstaller --onefile --windowed --name Pomodoro pomodoro.py
 ```
 
 What the options do:
