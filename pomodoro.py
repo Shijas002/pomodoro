@@ -14,10 +14,11 @@ import wave
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, QUrl, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -39,11 +40,63 @@ DB_PATH = Path.home() / ".pomodoro_todo.db"
 CHIME_PATH = Path.home() / ".pomodoro_chime.wav"
 SETTINGS_PATH = Path.home() / ".pomodoro_settings.json"
 
+# ---------- Pets ----------
+# Each pet is described by a few drawing options. Dogs have dog faces, cats have
+# pointy ears and whiskers, and the bunny has tall ears.
+PETS = {
+    "buddy": {
+        "name": "Buddy", "species": "dog",
+        "fur": "#F6E7CF", "accent": "#8B5A2B", "muzzle": "#FFF6E8",
+        "ears": "floppy", "tail": "wag", "collar": "#8B5A2B",
+    },
+    "coco": {
+        "name": "Coco", "species": "dog",
+        "fur": "#F3D9A4", "accent": "#E08A3C", "muzzle": "#FFFFFF",
+        "ears": "tall", "tail": "curl", "collar": "#C62828",
+    },
+    "max": {
+        "name": "Max", "species": "dog",
+        "fur": "#3A6FB0", "accent": "#7FA8D8", "muzzle": "#D9B38C",
+        "ears": "floppy", "tail": "wag", "collar": None,
+    },
+    "luca": {
+        "name": "Luca", "species": "dog",
+        "fur": "#2E2E33", "accent": "#A0692E", "muzzle": "#A0692E",
+        "ears": "pointy", "tail": "stub", "collar": None,
+    },
+    "milo": {
+        "name": "Milo", "species": "cat",
+        "fur": "#F5A94B", "accent": "#E08A3C", "muzzle": "#FFF3E0",
+        "ears": "pointy", "tail": "curl", "stripes": True, "eye": "#2E7D32",
+    },
+    "mochi": {
+        "name": "Mochi", "species": "cat",
+        "fur": "#FFFFFF", "accent": "#F8BBD0", "muzzle": "#FFFFFF",
+        "ears": "pointy", "tail": "curl", "eye": "#3B6EA5",
+    },
+    "whiskers": {
+        "name": "Whiskers", "species": "cat",
+        "fur": "#C9C2B5", "accent": "#8E857A", "muzzle": "#EDE7DC",
+        "ears": "pointy", "tail": "curl", "stripes": True, "eye": "#3B6EA5",
+    },
+    "sakura": {
+        "name": "Sakura", "species": "cat",
+        "fur": "#D9C7F2", "accent": "#F48FB1", "muzzle": "#F3EAFD",
+        "ears": "pointy", "tail": "curl", "eye": "#3B6EA5",
+    },
+    "hazel": {
+        "name": "Hazel", "species": "bunny",
+        "fur": "#FFF4E0", "accent": "#F8BBD0", "muzzle": "#FFFFFF",
+        "ears": "tall", "tail": "stub",
+    },
+}
+
 DEFAULT_SETTINGS = {
     "work_min": 25,
     "short_break_min": 5,
     "long_break_min": 15,
     "pomodoros_before_long": 4,
+    "pet": "buddy",
 }
 
 PHASE_WORK = "work"
@@ -58,8 +111,14 @@ def load_settings():
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             saved = json.load(f)
         for key in DEFAULT_SETTINGS:
-            if key in saved and isinstance(saved[key], int) and saved[key] > 0:
-                settings[key] = saved[key]
+            if key not in saved:
+                continue
+            value = saved[key]
+            if key == "pet":
+                if isinstance(value, str) and value in PETS:
+                    settings[key] = value
+            elif isinstance(value, int) and value > 0:
+                settings[key] = value
     except (OSError, ValueError):
         pass  # no file yet or unreadable: use defaults
     return settings
@@ -144,276 +203,239 @@ class Database:
         self.conn.commit()
 
 
-class SettingsDialog(QDialog):
-    """Lets the user change the timer durations. Values are saved on OK."""
+class Dog(QWidget):
+    """Animated pet drawn with Qt. The name stays Dog, but it draws any pet in PETS.
 
-    def __init__(self, parent, current):
-        super().__init__(parent)
-        self.setWindowTitle("Timer settings")
-        self.setModal(True)
-
-        form = QFormLayout()
-        self.work_spin = self._spin(current["work_min"], 1, 180, " min")
-        self.short_spin = self._spin(current["short_break_min"], 1, 60, " min")
-        self.long_spin = self._spin(current["long_break_min"], 1, 120, " min")
-        self.cycle_spin = self._spin(current["pomodoros_before_long"], 1, 10, " pomodoros")
-        form.addRow("Work session:", self.work_spin)
-        form.addRow("Short break:", self.short_spin)
-        form.addRow("Long break:", self.long_spin)
-        form.addRow("Pomodoros before long break:", self.cycle_spin)
-
-        buttons = QHBoxLayout()
-        defaults_btn = QPushButton("Defaults (25 / 5 / 15 / 4)")
-        defaults_btn.clicked.connect(self.load_defaults)
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
-        ok_btn = QPushButton("Save")
-        ok_btn.setDefault(True)
-        ok_btn.clicked.connect(self.accept)
-        buttons.addWidget(defaults_btn)
-        buttons.addStretch()
-        buttons.addWidget(cancel_btn)
-        buttons.addWidget(ok_btn)
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addLayout(buttons)
-
-    @staticmethod
-    def _spin(value, low, high, suffix):
-        spin = QSpinBox()
-        spin.setRange(low, high)
-        spin.setValue(value)
-        spin.setSuffix(suffix)
-        return spin
-
-    def load_defaults(self):
-        self.work_spin.setValue(DEFAULT_SETTINGS["work_min"])
-        self.short_spin.setValue(DEFAULT_SETTINGS["short_break_min"])
-        self.long_spin.setValue(DEFAULT_SETTINGS["long_break_min"])
-        self.cycle_spin.setValue(DEFAULT_SETTINGS["pomodoros_before_long"])
-
-    def values(self):
-        return {
-            "work_min": self.work_spin.value(),
-            "short_break_min": self.short_spin.value(),
-            "long_break_min": self.long_spin.value(),
-            "pomodoros_before_long": self.cycle_spin.value(),
-        }
-
-
-class Character(QWidget):
-    """Small animated character.
-
-    Typing on a keyboard while focusing, sleeping with ZZZ while resting.
+    Awake (work time): sits up, smiling, looking at you, with an occasional blink.
+    Asleep (break time): lies down with closed eyes and Z's floating up.
+    Click it to make it hop.
     """
 
-    def __init__(self):
+    GRID = 120  # all drawing is done on a 120 x 120 grid and scaled to the widget size
+
+    def __init__(self, size: int, pet_key: str = "buddy"):
         super().__init__()
-        self.setFixedSize(120, 100)
-        self.typing = False
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.pet = PETS[pet_key]
+        self.sleeping = False
         self.frame = 0
-        self._anim = QTimer(self)
-        self._anim.setInterval(350)
-        self._anim.timeout.connect(self._advance)
-        self._anim.start()
+        self.hop = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
 
-    def set_typing(self, typing: bool):
-        if typing != self.typing:
-            self.typing = typing
-            self.update()
-
-    def _advance(self):
-        self.frame += 1
+    def set_pet(self, pet_key: str):
+        self.pet = PETS[pet_key]
         self.update()
 
+    def set_sleeping(self, sleeping: bool):
+        if sleeping != self.sleeping:
+            self.sleeping = sleeping
+            self.update()
+
+    def mousePressEvent(self, event):
+        self.hop = 6
+        event.ignore()  # let the parent still receive drags and double-clicks
+
+    def _tick(self):
+        self.frame += 1
+        if self.hop:
+            self.hop -= 1
+        self.update()
+
+    # ----- drawing helpers -----
+
+    def _draw_tail(self, p, pet, ink, fur):
+        kind = pet["tail"]
+        if kind == "none":
+            return
+        start = QPointF(88, 92)
+        if self.sleeping:
+            end = QPointF(106, 100)
+        elif kind == "wag":
+            end = QPointF(108, 66 + 5 * math.sin(self.frame * 1.2))
+        elif kind == "curl":
+            end = QPointF(110, 58)
+        else:  # stub
+            end = QPointF(96, 86)
+        p.setPen(QPen(ink, 11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(start, end)
+        p.setPen(QPen(fur, 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(start, end)
+
+    def _draw_ears(self, p, pet, outline, fur, accent):
+        kind = pet["ears"]
+        p.setPen(outline)
+        p.setBrush(fur)
+        if kind == "floppy":
+            p.setBrush(accent)
+            p.drawEllipse(QRectF(10, 28, 30, 44))
+            p.drawEllipse(QRectF(80, 28, 30, 44))
+        elif kind == "pointy":
+            p.drawPolygon(QPolygonF([QPointF(30, 44), QPointF(36, 6), QPointF(60, 30)]))
+            p.drawPolygon(QPolygonF([QPointF(90, 44), QPointF(84, 6), QPointF(60, 30)]))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(accent)
+            p.drawPolygon(QPolygonF([QPointF(38, 40), QPointF(40, 18), QPointF(54, 30)]))
+            p.drawPolygon(QPolygonF([QPointF(82, 40), QPointF(80, 18), QPointF(66, 30)]))
+        elif kind == "tall":
+            p.drawEllipse(QRectF(32, 0, 18, 44))
+            p.drawEllipse(QRectF(70, 0, 18, 44))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(accent)
+            p.drawEllipse(QRectF(37, 6, 8, 30))
+            p.drawEllipse(QRectF(75, 6, 8, 30))
+
+    def _draw_eyes(self, p, pet, ink):
+        arc_pen = QPen(ink, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        if self.sleeping or self.frame % 28 == 0:
+            # Closed eyes: sleeping, or a short blink while awake
+            p.setPen(arc_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(QRectF(40, 46, 14, 8), 200 * 16, 140 * 16)
+            p.drawArc(QRectF(66, 46, 14, 8), 200 * 16, 140 * 16)
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(pet.get("eye", "#2B1B10")))
+            p.drawEllipse(QRectF(40, 42, 13, 15))
+            p.drawEllipse(QRectF(67, 42, 13, 15))
+            p.setBrush(QColor("#FFFFFF"))  # shine, makes the eyes look alive
+            p.drawEllipse(QRectF(45, 44, 4, 4))
+            p.drawEllipse(QRectF(72, 44, 4, 4))
+
+    def _draw_mouth(self, p, pet, ink):
+        p.setPen(QPen(ink, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if self.sleeping:
+            p.drawArc(QRectF(56, 66, 8, 5), 200 * 16, 140 * 16)
+            return
+        p.drawArc(QRectF(50, 64, 20, 12), 200 * 16, 140 * 16)
+        if pet["species"] == "dog":
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#F4A6B8"))  # tongue
+            p.drawEllipse(QRectF(56, 70, 8, 8))
+
     def paintEvent(self, event):
+        pet = self.pet
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        scale = min(self.width(), self.height()) / self.GRID
+        p.scale(scale, scale)
+
+        ink = QColor("#222222")
+        fur = QColor(pet["fur"])
+        accent = QColor(pet["accent"])
+        muzzle = QColor(pet["muzzle"])
+        outline = QPen(ink, 2.5)
+        outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        is_cat = pet["species"] == "cat"
+        sleeping = self.sleeping
+
+        # Vertical movement: hop when clicked, lower and breathing when asleep
+        bob = 0.0
+        if self.hop:
+            bob = -8.0 * math.sin(math.pi * self.hop / 6)
+        if sleeping:
+            bob += 3.0 + 0.6 * math.sin(self.frame * 0.6)
+
+        # Ground shadow (does not move with the pet)
         p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 40))
+        p.drawEllipse(QRectF(22, 104, 76, 9))
 
-        # Desk and keyboard
-        p.setBrush(QColor("#8B5A2B"))
-        p.drawRoundedRect(QRectF(6, 80, 108, 10), 4, 4)
-        p.setBrush(QColor("#555555"))
-        p.drawRoundedRect(QRectF(34, 72, 52, 8), 2, 2)
+        p.translate(0, bob)
 
-        # Body
-        p.setBrush(QColor("#4FC3F7"))
-        p.drawEllipse(QRectF(40, 44, 40, 32))
+        self._draw_tail(p, pet, ink, fur)
 
-        # Head (drops a little when sleeping)
-        head_y = 22 if self.typing else 28
-        p.setBrush(QColor("#FFE0B2"))
-        p.drawEllipse(QRectF(38, head_y, 44, 36))
-
-        # Eyes
-        if self.typing:
-            p.setBrush(QColor("#333333"))
-            p.drawEllipse(QRectF(50, head_y + 14, 5, 5))
-            p.drawEllipse(QRectF(65, head_y + 14, 5, 5))
+        # Body and paws
+        p.setPen(outline)
+        p.setBrush(fur)
+        if sleeping:
+            p.drawEllipse(QRectF(26, 72, 68, 34))
+            p.drawEllipse(QRectF(24, 94, 18, 11))
+            p.drawEllipse(QRectF(78, 94, 18, 11))
         else:
-            eye_pen = QPen(QColor("#333333"), 2)
-            eye_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            p.setPen(eye_pen)
+            p.drawEllipse(QRectF(32, 58, 56, 48))
+            p.drawEllipse(QRectF(34, 92, 20, 14))
+            p.drawEllipse(QRectF(66, 92, 20, 14))
+
+        # Ears go behind the head
+        self._draw_ears(p, pet, outline, fur, accent)
+
+        # Head
+        p.setPen(outline)
+        p.setBrush(fur)
+        p.drawEllipse(QRectF(26, 20, 68, 56))
+
+        # Tabby stripes on the forehead
+        if pet.get("stripes"):
+            p.setPen(QPen(ink, 2))
+            p.drawLine(QPointF(60, 22), QPointF(60, 30))
+            p.drawLine(QPointF(51, 24), QPointF(49, 31))
+            p.drawLine(QPointF(69, 24), QPointF(71, 31))
+
+        # Muzzle
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(muzzle)
+        if is_cat:
+            p.drawEllipse(QRectF(44, 56, 32, 20))
+        else:
+            p.drawEllipse(QRectF(40, 52, 40, 26))
+
+        # Blush for cats and the bunny
+        if pet["species"] in ("cat", "bunny"):
+            p.setBrush(QColor(255, 138, 160, 140))
+            p.drawEllipse(QRectF(28, 62, 10, 6))
+            p.drawEllipse(QRectF(82, 62, 10, 6))
+
+        self._draw_eyes(p, pet, ink)
+
+        # Nose
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(accent if is_cat else ink)
+        p.drawEllipse(QRectF(56, 58, 8, 6) if is_cat else QRectF(55, 58, 10, 7))
+
+        self._draw_mouth(p, pet, ink)
+
+        # Collar for dogs while awake
+        if pet.get("collar") and not sleeping and not is_cat:
+            p.setPen(QPen(QColor(pet["collar"]), 6))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawArc(QRectF(48, head_y + 14, 8, 6), 200 * 16, 140 * 16)
-            p.drawArc(QRectF(64, head_y + 14, 8, 6), 200 * 16, 140 * 16)
+            p.drawArc(QRectF(38, 74, 44, 14), 200 * 16, 140 * 16)
 
-        # Arms
-        arm_pen = QPen(QColor("#FFE0B2"), 7)
-        arm_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(arm_pen)
-        if self.typing:
-            # Hands alternate up and down to look like typing
-            left_y = 68 if self.frame % 2 == 0 else 72
-            right_y = 72 if self.frame % 2 == 0 else 68
-            p.drawLine(QPointF(40, 58), QPointF(42, left_y))
-            p.drawLine(QPointF(80, 58), QPointF(78, right_y))
-        else:
-            p.drawLine(QPointF(40, 60), QPointF(30, 74))
-            p.drawLine(QPointF(80, 60), QPointF(90, 74))
+        # Whiskers for cats while awake
+        if is_cat and not sleeping:
+            p.setPen(QPen(ink, 1.5))
+            p.drawLine(QPointF(30, 66), QPointF(10, 62))
+            p.drawLine(QPointF(30, 70), QPointF(10, 72))
+            p.drawLine(QPointF(90, 66), QPointF(110, 62))
+            p.drawLine(QPointF(90, 70), QPointF(110, 72))
 
-        # ZZZ rising from the head while sleeping
-        if not self.typing:
+        # Z's floating up while asleep
+        if sleeping:
             p.setPen(Qt.PenStyle.NoPen)
             for i in range(3):
                 t = ((self.frame + i * 4) % 12) / 12.0
                 font = QFont()
                 font.setBold(True)
-                font.setPointSize(8 + i * 2)
+                font.setPointSize(7 + i * 2)
                 p.setFont(font)
-                p.setPen(QColor(179, 229, 252, int(255 * (1 - t))))
-                x = 84 + i * 6 + t * 8
-                y = 34 - t * 28
-                p.drawText(QPointF(x, y), "Z")
-
-        p.end()
-
-
-class Pet(QWidget):
-    """Small 2D dog next to the mini timer.
-
-    Running: trots and wags its tail. Paused: lies down asleep with Z's.
-    Click it to make it jump.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.setFixedSize(60, 46)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.running = False
-        self.frame = 0
-        self.jump_frames = 0
-        self._timer = QTimer(self)
-        self._timer.setInterval(120)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
-
-    def set_running(self, running: bool):
-        if running != self.running:
-            self.running = running
-            self.update()
-
-    def jump(self):
-        self.jump_frames = 6
-
-    def mousePressEvent(self, event):
-        self.jump()
-        event.ignore()  # let the mini timer still receive drags and double-clicks
-
-    def _tick(self):
-        self.frame += 1
-        if self.jump_frames:
-            self.jump_frames -= 1
-        self.update()
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        fur = QColor("#D7A86E")
-        dark = QColor("#4A3520")
-
-        # Vertical position: bob while running, lower while lying down, hop when jumping
-        if self.running:
-            base = 1.5 * math.sin(self.frame * 0.9)
-        else:
-            base = 4.0
-        if self.jump_frames:
-            base -= 8.0 * math.sin(math.pi * self.jump_frames / 6)
-
-        # Ground shadow
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(0, 0, 0, 70))
-        p.drawEllipse(QRectF(10, 40, 40, 5))
-
-        # Tail
-        wag = 5 * math.sin(self.frame * 1.2) if self.running else 1.0
-        tail_pen = QPen(fur, 4)
-        tail_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(tail_pen)
-        p.drawLine(QPointF(12, 24 + base), QPointF(6, 16 + base + wag))
-
-        # Legs (alternate while running)
-        swing = 3 * math.sin(self.frame * 1.1) if self.running else 0.0
-        leg_pen = QPen(fur, 3)
-        leg_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(leg_pen)
-        p.drawLine(QPointF(16, 30 + base), QPointF(16 + swing, 40))
-        p.drawLine(QPointF(22, 30 + base), QPointF(22 - swing, 40))
-        p.drawLine(QPointF(34, 30 + base), QPointF(34 - swing, 40))
-        p.drawLine(QPointF(38, 30 + base), QPointF(38 + swing, 40))
-
-        # Body
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(fur)
-        p.drawEllipse(QRectF(10, 20 + base, 32, 14))
-
-        # Head and ear
-        p.drawEllipse(QRectF(34, 10 + base, 16, 14))
-        p.setBrush(dark)
-        p.drawEllipse(QRectF(40, 9 + base, 6, 8))
-
-        # Snout and nose
-        p.setBrush(QColor("#E8C48F"))
-        p.drawEllipse(QRectF(46, 17 + base, 7, 5))
-        p.setBrush(dark)
-        p.drawEllipse(QRectF(50, 17 + base, 3, 3))
-
-        # Eye: open dot while running, closed arc while sleeping
-        if self.running:
-            p.drawEllipse(QRectF(41, 14 + base, 3, 3))
-        else:
-            eye_pen = QPen(dark, 1.5)
-            eye_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            p.setPen(eye_pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawArc(QRectF(40, 15 + base, 5, 3), 200 * 16, 140 * 16)
-
-        # Z's rising while asleep
-        if not self.running:
-            p.setPen(Qt.PenStyle.NoPen)
-            font = QFont()
-            font.setBold(True)
-            font.setPointSize(7)
-            p.setFont(font)
-            for i in range(2):
-                t = ((self.frame + i * 5) % 10) / 10.0
-                p.setPen(QColor(150, 210, 255, int(255 * (1 - t))))
-                p.drawText(QPointF(44 + i * 4 + t * 4, 8 - t * 8), "Z")
+                p.setPen(QColor(90, 140, 200, int(255 * (1 - t))))
+                p.drawText(QPointF(92 + i * 8 + t * 6, 34 - t * 26), "Z")
 
         p.end()
 
 
 class MiniTimer(QWidget):
-    """Small always-on-top, frameless overlay that shows the time and a small dog.
+    """Small always-on-top, frameless overlay that shows the time and a small pet.
 
     Drag it anywhere to move it.
     Double-click: toggles play/pause. Pausing opens the task list.
     """
 
-    def __init__(self, on_double_click):
+    def __init__(self, on_double_click, pet_key):
         super().__init__(
             None,
             Qt.WindowType.Tool
@@ -425,20 +447,20 @@ class MiniTimer(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.label = QLabel("25:00", self)
-        self.pet = Pet()
+        self.dog = Dog(56, pet_key)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addWidget(self.label)
-        layout.addWidget(self.pet, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.dog, 0, Qt.AlignmentFlag.AlignVCenter)
         self.set_time("25:00", running=False)
 
         self.move(20, 20)  # top-left corner
 
-    def set_time(self, text: str, running: bool):
+    def set_time(self, text: str, running: bool, sleeping: bool = False):
         self.label.setText(text)
-        self.pet.set_running(running)
+        self.dog.set_sleeping(sleeping)
         # Green while running, amber while paused
         color = "#7CFC90" if running else "#FFD27F"
         self.label.setStyleSheet(
@@ -446,6 +468,9 @@ class MiniTimer(QWidget):
             f"color: {color}; background-color: rgba(30, 30, 30, 210);"
             "padding: 4px 10px; border-radius: 6px;"
         )
+
+    def set_pet(self, pet_key):
+        self.dog.set_pet(pet_key)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -463,6 +488,80 @@ class MiniTimer(QWidget):
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.on_double_click()
+
+
+class SettingsDialog(QDialog):
+    """Timer durations and pet choice. Values are saved on OK."""
+
+    def __init__(self, parent, current):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setModal(True)
+
+        # Pet picker with a live preview at the top
+        pet_row = QHBoxLayout()
+        self.pet_combo = QComboBox()
+        for key, info in PETS.items():
+            self.pet_combo.addItem(f"{info['name']} ({info['species']})", key)
+        self.pet_combo.setCurrentIndex(self.pet_combo.findData(current["pet"]))
+        self.preview = Dog(120, current["pet"])
+        self.pet_combo.currentIndexChanged.connect(self._preview_pet)
+
+        form = QFormLayout()
+        form.addRow("Pet:", self.pet_combo)
+        self.work_spin = self._spin(current["work_min"], 1, 180, " min")
+        self.short_spin = self._spin(current["short_break_min"], 1, 60, " min")
+        self.long_spin = self._spin(current["long_break_min"], 1, 120, " min")
+        self.cycle_spin = self._spin(current["pomodoros_before_long"], 1, 10, " pomodoros")
+        form.addRow("Work session:", self.work_spin)
+        form.addRow("Short break:", self.short_spin)
+        form.addRow("Long break:", self.long_spin)
+        form.addRow("Pomodoros before long break:", self.cycle_spin)
+
+        buttons = QHBoxLayout()
+        defaults_btn = QPushButton("Defaults")
+        defaults_btn.clicked.connect(self.load_defaults)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("Save")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self.accept)
+        buttons.addWidget(defaults_btn)
+        buttons.addStretch()
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(ok_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.preview, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addLayout(form)
+        layout.addLayout(buttons)
+
+    def _preview_pet(self, _index):
+        self.preview.set_pet(self.pet_combo.currentData())
+
+    @staticmethod
+    def _spin(value, low, high, suffix):
+        spin = QSpinBox()
+        spin.setRange(low, high)
+        spin.setValue(value)
+        spin.setSuffix(suffix)
+        return spin
+
+    def load_defaults(self):
+        self.work_spin.setValue(DEFAULT_SETTINGS["work_min"])
+        self.short_spin.setValue(DEFAULT_SETTINGS["short_break_min"])
+        self.long_spin.setValue(DEFAULT_SETTINGS["long_break_min"])
+        self.cycle_spin.setValue(DEFAULT_SETTINGS["pomodoros_before_long"])
+        self.pet_combo.setCurrentIndex(self.pet_combo.findData(DEFAULT_SETTINGS["pet"]))
+
+    def values(self):
+        return {
+            "work_min": self.work_spin.value(),
+            "short_break_min": self.short_spin.value(),
+            "long_break_min": self.long_spin.value(),
+            "pomodoros_before_long": self.cycle_spin.value(),
+            "pet": self.pet_combo.currentData(),
+        }
 
 
 class TaskPanel(QWidget):
@@ -547,7 +646,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
 
         self.setWindowTitle("Pomodoro + Todo")
-        self.resize(900, 560)
+        self.resize(900, 640)
 
         # Timer state
         self.phase = PHASE_WORK
@@ -573,7 +672,8 @@ class MainWindow(QMainWindow):
         self.sound.setVolume(1.0)
 
         # Floating mini timer and its task panel (both hidden until used)
-        self.mini = MiniTimer(on_double_click=self.mini_double_click)
+        self.mini = MiniTimer(on_double_click=self.mini_double_click,
+                              pet_key=self.settings["pet"])
         self.task_panel = TaskPanel(self)
 
         self._build_ui()
@@ -646,9 +746,9 @@ class MainWindow(QMainWindow):
         )
         timer_layout.addWidget(self.time_label)
 
-        # Animated character: types while focusing, sleeps while resting
-        self.character = Character()
-        timer_layout.addWidget(self.character, 0, Qt.AlignmentFlag.AlignHCenter)
+        # The pet: looks at you while working, sleeps during breaks
+        self.dog = Dog(150, self.settings["pet"])
+        timer_layout.addWidget(self.dog, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.count_label = QLabel()
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -806,9 +906,11 @@ class MainWindow(QMainWindow):
         self.time_label.setText(f"{mins:02d}:{secs:02d}")
         self.phase_label.setText(self.phase.title())
         self.start_btn.setText("Pause" if self.running else "Start")
-        self.mini.set_time(self.time_label.text(), self.running)
-        # Typing only during a running work session; sleeping otherwise
-        self.character.set_typing(self.running and self.phase == PHASE_WORK)
+
+        # The pet sleeps during breaks and looks at you while working
+        sleeping = self.phase != PHASE_WORK
+        self.dog.set_sleeping(sleeping)
+        self.mini.set_time(self.time_label.text(), self.running, sleeping)
 
         if self.current_task_id is not None:
             task = self.db.get_task(self.current_task_id)
@@ -835,6 +937,9 @@ class MainWindow(QMainWindow):
             return
         self.settings = dialog.values()
         save_settings(self.settings)
+        # Apply the chosen pet to both the main window and the mini timer
+        self.dog.set_pet(self.settings["pet"])
+        self.mini.set_pet(self.settings["pet"])
         # If the timer is stopped, show the new length of the current phase right away.
         # If it is running, the new length applies from the next phase.
         if not self.running:
