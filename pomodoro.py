@@ -28,10 +28,12 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QStyle,
     QSystemTrayIcon,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -150,7 +152,7 @@ def make_chime(path: Path):
 
 
 class Database:
-    """Small wrapper around SQLite for storing tasks."""
+    """Small wrapper around SQLite for storing tasks and notes."""
 
     def __init__(self, path: Path):
         self.conn = sqlite3.connect(path)
@@ -166,7 +168,18 @@ class Database:
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notes (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                title    TEXT NOT NULL,
+                content  TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         self.conn.commit()
+
+    # ----- tasks -----
 
     def all_tasks(self):
         return self.conn.execute(
@@ -201,6 +214,253 @@ class Database:
             (task_id,),
         )
         self.conn.commit()
+
+    # ----- notes -----
+
+    def all_notes(self):
+        return self.conn.execute(
+            "SELECT * FROM notes ORDER BY id ASC"
+        ).fetchall()
+
+    def get_note(self, note_id: int):
+        return self.conn.execute(
+            "SELECT * FROM notes WHERE id = ?", (note_id,)
+        ).fetchone()
+
+    def add_note(self, title: str, content: str):
+        self.conn.execute(
+            "INSERT INTO notes (title, content) VALUES (?, ?)", (title, content)
+        )
+        self.conn.commit()
+
+    def update_note(self, note_id: int, title: str, content: str):
+        self.conn.execute(
+            "UPDATE notes SET title = ?, content = ? WHERE id = ?",
+            (title, content, note_id),
+        )
+        self.conn.commit()
+
+    def delete_note(self, note_id: int):
+        self.conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        self.conn.commit()
+
+
+class NoteEditDialog(QDialog):
+    """Dialog to add or edit a note (title + content)."""
+
+    def __init__(self, parent, title="", content=""):
+        super().__init__(parent)
+        self.setWindowTitle("Note")
+        self.setModal(True)
+        self.resize(420, 320)
+
+        self.title_input = QLineEdit(title)
+        self.title_input.setPlaceholderText("e.g. vm password")
+        self.content_input = QPlainTextEdit(content)
+        self.content_input.setPlaceholderText("The note text (password, username, etc.)")
+
+        form = QFormLayout()
+        form.addRow("Title:", self.title_input)
+
+        buttons = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("Save")
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(self.accept)
+        buttons.addStretch()
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self.content_input, 1)
+        layout.addLayout(buttons)
+
+    def values(self):
+        return self.title_input.text().strip(), self.content_input.toPlainText()
+
+
+class NoteWindow(QDialog):
+    """Separate window that shows one note with a Copy button."""
+
+    def __init__(self, note):
+        super().__init__(None)
+        self.setWindowTitle(note["title"])
+        self.resize(440, 340)
+
+        title_label = QLabel(f"<b>{note['title']}</b>")
+        title_label.setWordWrap(True)
+
+        self.text = QPlainTextEdit(note["content"])
+        self.text.setReadOnly(True)
+
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.clicked.connect(self.copy_text)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.copy_btn)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(title_label)
+        layout.addWidget(self.text, 1)
+        layout.addLayout(buttons)
+
+    def copy_text(self):
+        QApplication.clipboard().setText(self.text.toPlainText())
+        self.copy_btn.setText("Copied ✓")
+        QTimer.singleShot(1500, self._reset_copy_label)
+
+    def _reset_copy_label(self):
+        try:
+            self.copy_btn.setText("Copy")
+        except RuntimeError:
+            pass  # window was closed in the meantime
+
+
+class NoteRow(QWidget):
+    """One row in the notes list: clickable title on the left, Copy button on the right."""
+
+    def __init__(self, title, content, on_open):
+        super().__init__()
+        self.content = content
+
+        title_btn = QPushButton(title)
+        title_btn.setFlat(True)
+        title_btn.setStyleSheet("text-align: left; padding: 4px 6px;")
+        title_btn.clicked.connect(lambda checked=False: on_open())
+
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setFixedWidth(70)
+        self.copy_btn.clicked.connect(lambda checked=False: self._copy())
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.addWidget(title_btn, 1)
+        layout.addWidget(self.copy_btn)
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.content)
+        self.copy_btn.setText("Copied ✓")
+        QTimer.singleShot(1500, self._reset_copy_label)
+
+    def _reset_copy_label(self):
+        try:
+            self.copy_btn.setText("Copy")
+        except RuntimeError:
+            pass  # row was rebuilt in the meantime
+
+
+class NotesView(QWidget):
+    """List of note titles with Copy buttons, plus add / edit / delete."""
+
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        self._windows = []  # keeps note windows alive while they are open
+
+        self.list = QListWidget()
+        self.list.setSpacing(2)
+
+        add_btn = QPushButton("Add note")
+        add_btn.clicked.connect(self.add_note)
+        edit_btn = QPushButton("Edit selected")
+        edit_btn.clicked.connect(self.edit_selected)
+        del_btn = QPushButton("Delete selected")
+        del_btn.clicked.connect(self.delete_selected)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(add_btn)
+        buttons.addWidget(edit_btn)
+        buttons.addWidget(del_btn)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(buttons)
+
+        self.reload()
+
+    def reload(self):
+        self.list.clear()
+        for note in self.db.all_notes():
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, note["id"])
+            self.list.addItem(item)
+            row = NoteRow(
+                note["title"],
+                note["content"],
+                # Selecting the row first makes Edit/Delete work on the note clicked
+                lambda nid=note["id"], it=item: self._open_from_row(nid, it),
+            )
+            item.setSizeHint(row.sizeHint())
+            self.list.setItemWidget(item, row)
+
+    def _open_from_row(self, note_id, item):
+        self.list.setCurrentItem(item)
+        self.open_note(note_id)
+
+    def open_note(self, note_id):
+        note = self.db.get_note(note_id)
+        if note is None:
+            return
+        win = NoteWindow(note)
+        self._windows.append(win)
+        win.finished.connect(lambda _result, w=win: self._forget_window(w))
+        win.show()
+
+    def _forget_window(self, win):
+        if win in self._windows:
+            self._windows.remove(win)
+
+    def selected_note_id(self):
+        item = self.list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def add_note(self):
+        dialog = NoteEditDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        title, content = dialog.values()
+        if not title:
+            QMessageBox.information(self, "Missing title", "Please give the note a title.")
+            return
+        self.db.add_note(title, content)
+        self.reload()
+
+    def edit_selected(self):
+        note_id = self.selected_note_id()
+        if note_id is None:
+            QMessageBox.information(self, "No note", "Select a note first.")
+            return
+        note = self.db.get_note(note_id)
+        dialog = NoteEditDialog(self, note["title"], note["content"])
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        title, content = dialog.values()
+        if not title:
+            QMessageBox.information(self, "Missing title", "Please give the note a title.")
+            return
+        self.db.update_note(note_id, title, content)
+        self.reload()
+
+    def delete_selected(self):
+        note_id = self.selected_note_id()
+        if note_id is None:
+            QMessageBox.information(self, "No note", "Select a note first.")
+            return
+        note = self.db.get_note(note_id)
+        answer = QMessageBox.question(
+            self, "Delete note", f"Delete '{note['title']}'?"
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.db.delete_note(note_id)
+        self.reload()
 
 
 class Dog(QWidget):
@@ -432,7 +692,7 @@ class MiniTimer(QWidget):
     """Small always-on-top, frameless overlay that shows the time and a small pet.
 
     Drag it anywhere to move it.
-    Double-click: toggles play/pause. Pausing opens the task list.
+    Double-click: toggles play/pause. Pausing opens the task and notes popup.
     """
 
     def __init__(self, on_double_click, pet_key):
@@ -499,7 +759,6 @@ class SettingsDialog(QDialog):
         self.setModal(True)
 
         # Pet picker with a live preview at the top
-        pet_row = QHBoxLayout()
         self.pet_combo = QComboBox()
         for key, info in PETS.items():
             self.pet_combo.addItem(f"{info['name']} ({info['species']})", key)
@@ -565,9 +824,9 @@ class SettingsDialog(QDialog):
 
 
 class TaskPanel(QWidget):
-    """Small floating task list shown under the mini timer while paused.
+    """Floating popup under the mini timer, shown while paused.
 
-    Click a task to tick it off or un-tick it.
+    Has two tabs: Tasks (click a task to tick it off) and Notes (copy buttons).
     """
 
     def __init__(self, main):
@@ -582,19 +841,30 @@ class TaskPanel(QWidget):
             "TaskPanel { background-color: #2b2b2b; border: 1px solid #555;"
             " border-radius: 6px; }"
             "QLabel { color: #ffffff; }"
+            "QTabWidget::pane { border: none; }"
+            "QTabBar::tab { color: #ffffff; padding: 4px 12px; }"
         )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        header = QLabel("<b>Tasks</b>  (click to tick off)")
-        layout.addWidget(header)
+        self.tabs = QTabWidget()
 
+        # Tasks tab
+        tasks_page = QWidget()
+        tasks_layout = QVBoxLayout(tasks_page)
+        tasks_layout.setContentsMargins(0, 6, 0, 0)
+        tasks_layout.addWidget(QLabel("Click a task to tick it off"))
         self.list = QListWidget()
-        self.list.setMinimumWidth(320)
-        self.list.setMinimumHeight(220)
         self.list.itemClicked.connect(self.toggle_item)
-        layout.addWidget(self.list, 1)
+        tasks_layout.addWidget(self.list, 1)
+        self.tabs.addTab(tasks_page, "Tasks")
+
+        # Notes tab
+        self.notes_view = NotesView(main.db)
+        self.tabs.addTab(self.notes_view, "Notes")
+
+        layout.addWidget(self.tabs, 1)
 
         row = QHBoxLayout()
         start_btn = QPushButton("Start timer")
@@ -604,6 +874,8 @@ class TaskPanel(QWidget):
         row.addWidget(start_btn)
         row.addWidget(close_btn)
         layout.addLayout(row)
+
+        self.setMinimumSize(380, 340)
 
     def reload(self):
         self.list.clear()
@@ -619,6 +891,7 @@ class TaskPanel(QWidget):
                 font.setStrikeOut(True)
                 item.setFont(font)
             self.list.addItem(item)
+        self.notes_view.reload()
 
     def toggle_item(self, item):
         task_id = item.data(Qt.ItemDataRole.UserRole)
@@ -671,7 +944,7 @@ class MainWindow(QMainWindow):
         self.sound.setSource(QUrl.fromLocalFile(str(CHIME_PATH)))
         self.sound.setVolume(1.0)
 
-        # Floating mini timer and its task panel (both hidden until used)
+        # Floating mini timer and its popup (both hidden until used)
         self.mini = MiniTimer(on_double_click=self.mini_double_click,
                               pet_key=self.settings["pet"])
         self.task_panel = TaskPanel(self)
@@ -687,7 +960,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
-        # Left side: tasks
+        # Left side: Tasks tab and Notes tab
         tasks_layout = QVBoxLayout()
         tasks_layout.addWidget(QLabel("<h3>Tasks</h3>"))
 
@@ -723,7 +996,13 @@ class MainWindow(QMainWindow):
         action_row.addWidget(del_btn)
         tasks_layout.addLayout(action_row)
 
-        root.addLayout(tasks_layout, 1)
+        tasks_page = QWidget()
+        tasks_page.setLayout(tasks_layout)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(tasks_page, "Tasks")
+        self.notes_view = NotesView(self.db)
+        self.tabs.addTab(self.notes_view, "Notes")
+        root.addWidget(self.tabs, 1)
 
         # Right side: timer
         timer_layout = QVBoxLayout()
@@ -946,10 +1225,10 @@ class MainWindow(QMainWindow):
             self.remaining = self.phase_seconds(self.phase)
         self.update_display()
 
-    # ---------- Mini timer and task panel ----------
+    # ---------- Mini timer and popup ----------
 
     def mini_double_click(self):
-        """Double-click on the mini timer: play/pause. The task list opens on pause."""
+        """Double-click on the mini timer: play/pause. The popup opens on pause."""
         self.toggle_running()
         if self.running:
             self.task_panel.hide()
@@ -959,7 +1238,7 @@ class MainWindow(QMainWindow):
     def open_task_panel(self):
         self.task_panel.reload()
         self.task_panel.adjustSize()
-        # Place the panel just below the mini timer
+        # Place the popup just below the mini timer
         self.task_panel.move(self.mini.x(), self.mini.y() + self.mini.height() + 6)
         self.task_panel.show()
         self.task_panel.raise_()
